@@ -130,30 +130,31 @@ function MetricChart({ exams, metricKey, unit, isKg }) {
       .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
   }, [exams, metricKey, isKg])
 
+  // All consts must be declared before any early return (React 18 / Rollup TDZ requirement)
+  const vals        = points.length >= 2 ? points.map(p => p.val) : []
+  const minVal      = vals.length ? Math.min(...vals) : 0
+  const maxVal      = vals.length ? Math.max(...vals) : 1
+  const spread      = maxVal - minVal || 0.5
+  const padV        = spread * 0.18
+  const xOf         = i => PAD.left + (i / Math.max(points.length - 1, 1)) * cW
+  const yOf         = v => PAD.top  + cH - ((v - (minVal - padV)) / (spread + padV * 2)) * cH
+  const ptCoords    = points.map((p, i) => ({ x: xOf(i), y: yOf(p.val), p }))
+  const polyline    = ptCoords.map(p => `${p.x},${p.y}`).join(' ')
+  const tickCount   = 3
+  const yTicks      = Array.from({ length: tickCount + 1 }, (_, i) => {
+    const v = (minVal - padV) + ((spread + padV * 2) * i / tickCount)
+    return { v: Math.round(v * 10) / 10, y: PAD.top + cH - (i / tickCount) * cH }
+  })
+  const xLabelIdx   = points.length <= 5
+    ? points.map((_, i) => i)
+    : [0,1,2,3,4].map(i => Math.round(i * (points.length - 1) / 4))
+  const displayUnit = metricKey === 'weight_kg' ? (isKg ? 'kg' : 'lbs') : unit
+
   if (points.length < 2) return (
     <div style={{ textAlign:'center', padding:'24px 0', color:'#9a8a7a', fontSize:'13px' }}>
       {points.length === 0 ? `No ${unit} data recorded yet.` : `Need at least 2 data points to show a chart.`}
     </div>
   )
-
-  const vals   = points.map(p => p.val)
-  const minVal = Math.min(...vals), maxVal = Math.max(...vals)
-  const spread = maxVal - minVal || 0.5
-  const padV   = spread * 0.18
-  const xOf = i  => PAD.left + (i / Math.max(points.length - 1, 1)) * cW
-  const yOf = v  => PAD.top  + cH - ((v - (minVal - padV)) / (spread + padV * 2)) * cH
-  const ptCoords = points.map((p, i) => ({ x: xOf(i), y: yOf(p.val), p }))
-  const polyline = ptCoords.map(p => `${p.x},${p.y}`).join(' ')
-  const tickCount = 3
-  const yTicks = Array.from({ length: tickCount + 1 }, (_, i) => {
-    const v = (minVal - padV) + ((spread + padV * 2) * i / tickCount)
-    return { v: Math.round(v * 10) / 10, y: PAD.top + cH - (i / tickCount) * cH }
-  })
-  const xLabelIdx = points.length <= 5
-    ? points.map((_, i) => i)
-    : [0,1,2,3,4].map(i => Math.round(i * (points.length - 1) / 4))
-
-  const displayUnit = metricKey === 'weight_kg' ? (isKg ? 'kg' : 'lbs') : unit
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', overflow:'visible' }}
