@@ -1,6 +1,7 @@
 /**
- * dataService.js
- * All storage logic lives here. Swap this file to change backends.
+ * dataService.js — v4
+ * Exam-based metric system. Treatments are decoupled from weight.
+ * Weight (and all vitals) live in exams/exam_metrics.
  */
 
 import { supabase } from './supabase'
@@ -8,10 +9,11 @@ import { supabase } from './supabase'
 const LS_LOG         = 'vt_log'
 const LS_MEDS        = 'vt_meds'
 const LS_ANIMALS     = 'vt_animals'
-const LS_WEIGHT_LOGS = 'vt_weight_logs'
+const LS_EXAMS       = 'vt_exams'
+const LS_METRICS_DEF = 'vt_metric_defs'
 const LS_SETTINGS    = 'vt_settings'
 
-// ─── localStorage helpers ─────────────────────────────────────────────────────
+// ─── localStorage helpers ─────────────────────────────────────
 function lsGet(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback }
   catch { return fallback }
@@ -20,11 +22,11 @@ function lsSet(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)) } catch {}
 }
 
-// ─── Unit helpers ─────────────────────────────────────────────────────────────
+// ─── Unit helpers ─────────────────────────────────────────────
 export const toKg  = lbs => Math.round((lbs / 2.205) * 1000) / 1000
 export const toLbs = kg  => Math.round((kg  * 2.205) * 100)  / 100
 
-// ─── Connection check ─────────────────────────────────────────────────────────
+// ─── Connection ───────────────────────────────────────────────
 export async function checkSupabase() {
   if (!supabase) return false
   try {
@@ -33,13 +35,53 @@ export async function checkSupabase() {
   } catch { return false }
 }
 
-// ─── Settings ─────────────────────────────────────────────────────────────────
-export function loadSettings() {
-  return lsGet(LS_SETTINGS, { weightUnit: 'kg' })
-}
+// ─── Settings ─────────────────────────────────────────────────
+export function loadSettings() { return lsGet(LS_SETTINGS, { weightUnit: 'kg' }) }
 export function saveSettings(s) { lsSet(LS_SETTINGS, s) }
 
-// ─── Medications ─────────────────────────────────────────────────────────────
+// ─── Metric definitions ───────────────────────────────────────
+export const DEFAULT_METRIC_DEFS = [
+  { key: 'weight_kg',  label: 'Weight',      unit: 'kg',  is_dose_weight: true,  display_order: 1 },
+  { key: 'length_cm',  label: 'Length',       unit: 'cm',  is_dose_weight: false, display_order: 2 },
+  { key: 'temp_f',     label: 'Temperature',  unit: '°F',  is_dose_weight: false, display_order: 3 },
+  { key: 'age_weeks',  label: 'Age',          unit: 'wks', is_dose_weight: false, display_order: 4 },
+]
+
+export async function loadMetricDefs(useSupabase) {
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('metric_definitions').select('*').order('display_order')
+    if (!error && data?.length) return data
+  }
+  return lsGet(LS_METRICS_DEF, DEFAULT_METRIC_DEFS)
+}
+
+export async function saveMetricDefs(defs, useSupabase) {
+  lsSet(LS_METRICS_DEF, defs)
+  if (useSupabase) {
+    await supabase.from('metric_definitions').upsert(
+      defs.map(d => ({ key: d.key, label: d.label, unit: d.unit, is_dose_weight: !!d.is_dose_weight, display_order: d.display_order })),
+      { onConflict: 'key' }
+    )
+  }
+}
+
+export async function addMetricDef(def, useSupabase) {
+  if (useSupabase) {
+    const { data } = await supabase.from('metric_definitions')
+      .insert({ key: def.key, label: def.label, unit: def.unit, is_dose_weight: !!def.is_dose_weight, display_order: def.display_order ?? 99 })
+      .select().single()
+    return data
+  }
+  return { ...def, id: Date.now() }
+}
+
+export async function deleteMetricDef(key, useSupabase) {
+  if (useSupabase)
+    await supabase.from('metric_definitions').delete().eq('key', key)
+}
+
+// ─── Medications ─────────────────────────────────────────────
 export const DEFAULT_MEDS = [
   { name: 'Diclazuril 1%',                  concentration: '10 mg/mL',  indication: 'Coccidia',                             factor: 0.1102 },
   { name: 'Diclazuril 5%',                  concentration: '50 mg/mL',  indication: 'Coccidia',                             factor: 0.0999 },
@@ -64,20 +106,18 @@ export const DEFAULT_MEDS = [
 export async function loadMeds(useSupabase) {
   if (useSupabase) {
     const { data, error } = await supabase.from('medications').select('*').order('name')
-    if (!error && data?.length > 0)
-      return data.map(r => ({ id: r.id, name: r.name, factor: r.factor, concentration: r.concentration, indication: r.indication }))
+    if (!error && data?.length) return data
   }
   return lsGet(LS_MEDS, DEFAULT_MEDS)
 }
 
 export async function saveMeds(meds, useSupabase) {
   lsSet(LS_MEDS, meds)
-  if (useSupabase) {
+  if (useSupabase)
     await supabase.from('medications').upsert(
       meds.map(m => ({ name: m.name, factor: m.factor, concentration: m.concentration || null, indication: m.indication || null })),
       { onConflict: 'name' }
     )
-  }
 }
 
 export async function addMed(med, useSupabase) {
@@ -102,7 +142,7 @@ export async function deleteMed(med, useSupabase) {
     await supabase.from('medications').delete().eq('id', med.id)
 }
 
-// ─── Animals ──────────────────────────────────────────────────────────────────
+// ─── Animals ─────────────────────────────────────────────────
 export async function loadAnimals(useSupabase) {
   if (useSupabase) {
     const { data, error } = await supabase.from('animals').select('*').order('name')
@@ -138,100 +178,135 @@ export async function uploadAnimalPhoto(animalName, file) {
   } catch { return null }
 }
 
-// ─── Weight logs ──────────────────────────────────────────────────────────────
-export async function loadWeightLogs(animalName, useSupabase) {
+// ─── Exams ────────────────────────────────────────────────────
+/**
+ * Load all exams for one animal, newest first, with metrics array.
+ * Each exam: { id, animal_name, recorded_at, notes, label, metrics: [{ metric, value, unit }] }
+ */
+export async function loadExams(animalName, useSupabase) {
   if (useSupabase) {
-    const { data, error } = await supabase
-      .from('weight_logs')
-      .select('*')
+    const { data: examRows, error } = await supabase
+      .from('exams')
+      .select('*, exam_metrics(*)')
       .eq('animal_name', animalName)
-      .order('recorded_at', { ascending: true })
-    if (!error && data) return data.map(r => ({
-      id: r.id,
-      animal_name: r.animal_name,
-      weight_kg:   r.weight_kg,
-      weight_lbs:  r.weight_lbs ?? toLbs(r.weight_kg),
-      recorded_at: r.recorded_at,
-      label:       new Date(r.recorded_at).toLocaleDateString(),
-    }))
+      .order('recorded_at', { ascending: false })
+    if (!error && examRows) return examRows.map(formatExam)
   }
-  // localStorage fallback: filter from all weight logs
-  const all = lsGet(LS_WEIGHT_LOGS, [])
+  // localStorage
+  const all = lsGet(LS_EXAMS, [])
   return all
-    .filter(r => r.animal_name === animalName)
-    .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
+    .filter(e => e.animal_name === animalName)
+    .sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at))
+    .map(formatExam)
 }
 
-export async function addWeightLog(entry, useSupabase) {
-  const row = {
-    animal_name: entry.animal_name,
-    weight_kg:   entry.weight_kg,
-    weight_lbs:  toLbs(entry.weight_kg),
-    recorded_at: entry.recorded_at || new Date().toISOString(),
-    label:       new Date(entry.recorded_at || Date.now()).toLocaleDateString(),
-  }
+/**
+ * Load latest exam per animal for the animals list / calculator autofill.
+ * Returns map: { animalName: exam }
+ */
+export async function loadLatestExams(useSupabase) {
   if (useSupabase) {
-    const { data } = await supabase.from('weight_logs')
-      .insert({ animal_name: row.animal_name, weight_kg: row.weight_kg, recorded_at: row.recorded_at })
+    // Get the most recent exam per animal with its metrics
+    const { data, error } = await supabase
+      .from('exams')
+      .select('*, exam_metrics(*)')
+      .order('recorded_at', { ascending: false })
+    if (!error && data) {
+      const map = {}
+      data.forEach(row => {
+        if (!map[row.animal_name]) map[row.animal_name] = formatExam(row)
+      })
+      return map
+    }
+  }
+  // localStorage
+  const all = lsGet(LS_EXAMS, [])
+  const map = {}
+  all.sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at))
+    .forEach(e => { if (!map[e.animal_name]) map[e.animal_name] = formatExam(e) })
+  return map
+}
+
+function formatExam(row) {
+  const metrics = (row.exam_metrics || []).map(m => ({
+    id: m.id, metric: m.metric, value: m.value, unit: m.unit
+  }))
+  return {
+    id:          row.id,
+    animal_name: row.animal_name,
+    recorded_at: row.recorded_at,
+    notes:       row.notes || '',
+    label:       new Date(row.recorded_at).toLocaleDateString(),
+    metrics,
+  }
+}
+
+export async function saveExam(exam, useSupabase) {
+  // exam = { animal_name, recorded_at, notes, metrics: [{ metric, value, unit }] }
+  if (useSupabase) {
+    const { data: examRow } = await supabase.from('exams')
+      .insert({ animal_name: exam.animal_name, recorded_at: exam.recorded_at, notes: exam.notes || null })
       .select().single()
-    return { ...row, id: data.id }
+    if (exam.metrics?.length) {
+      await supabase.from('exam_metrics').insert(
+        exam.metrics.map(m => ({ exam_id: examRow.id, metric: m.metric, value: m.value, unit: m.unit || null }))
+      )
+    }
+    return formatExam({ ...examRow, exam_metrics: exam.metrics?.map((m,i) => ({ ...m, id: i })) || [] })
   }
-  const saved = { ...row, id: Date.now() }
-  const all = lsGet(LS_WEIGHT_LOGS, [])
-  lsSet(LS_WEIGHT_LOGS, [...all, saved])
-  return saved
+  // localStorage
+  const saved = {
+    ...exam,
+    id: Date.now(),
+    exam_metrics: exam.metrics || [],
+  }
+  const all = lsGet(LS_EXAMS, [])
+  lsSet(LS_EXAMS, [...all, saved])
+  return formatExam(saved)
 }
 
-export async function deleteWeightLog(id, useSupabase) {
-  if (useSupabase) {
-    await supabase.from('weight_logs').delete().eq('id', id)
-  } else {
-    const all = lsGet(LS_WEIGHT_LOGS, [])
-    lsSet(LS_WEIGHT_LOGS, all.filter(r => r.id !== id))
+export async function deleteExam(id, useSupabase) {
+  if (useSupabase)
+    await supabase.from('exams').delete().eq('id', id) // cascade deletes metrics
+  else {
+    const all = lsGet(LS_EXAMS, [])
+    lsSet(LS_EXAMS, all.filter(e => e.id !== id))
   }
 }
 
-// ─── Treatments ───────────────────────────────────────────────────────────────
+// ─── Treatments ───────────────────────────────────────────────
 export async function loadTreatments(useSupabase) {
   if (useSupabase) {
     const { data, error } = await supabase
       .from('treatments').select('*').order('created_at', { ascending: false })
     if (!error && data) return data.map(r => ({
-      id:          r.id,
-      timestamp:   new Date(r.created_at).toLocaleString(),
-      animalName:  r.animal_name,
-      weight_kg:   r.weight_kg,
-      weight_lbs:  r.weight_lbs ?? toLbs(r.weight_kg),
-      medication:  r.medication,
-      dose:        r.dose,
-      notes:       r.notes || '',
+      id:         r.id,
+      timestamp:  new Date(r.created_at).toLocaleString(),
+      animalName: r.animal_name,
+      medication: r.medication,
+      dose:       r.dose,
+      notes:      r.notes || '',
     }))
   }
-  const raw = lsGet(LS_LOG, [])
-  return raw.map(r => ({
-    ...r,
-    weight_kg:  r.weight_kg  ?? toKg(r.weight ?? 0),
-    weight_lbs: r.weight_lbs ?? (r.weight ?? toLbs(r.weight_kg ?? 0)),
-  }))
+  return lsGet(LS_LOG, [])
 }
 
 export async function addTreatment(entry, useSupabase) {
   if (useSupabase) {
     const { data } = await supabase.from('treatments').insert({
       animal_name: entry.animalName,
-      weight_kg:   entry.weight_kg,
       medication:  entry.medication,
       dose:        entry.dose,
       notes:       entry.notes || null,
     }).select().single()
-    return { ...entry, id: data.id, weight_lbs: data.weight_lbs ?? toLbs(entry.weight_kg) }
+    return { ...entry, id: data.id }
   }
   return entry
 }
 
 export function saveTreatmentsLocal(treatments) { lsSet(LS_LOG, treatments) }
 
-// ─── CSV medication import ────────────────────────────────────────────────────
+// ─── CSV medication import ────────────────────────────────────
 export function parseMedCSV(text) {
   const lines = text.trim().split('\n').filter(Boolean)
   const cols  = lines[0].toLowerCase().split(',').map(c => c.trim().replace(/['"]/g, ''))
@@ -251,20 +326,20 @@ export function parseMedCSV(text) {
   }).filter(m => m.name && m.factor > 0)
 }
 
-// ─── Export / Import ──────────────────────────────────────────────────────────
-export function exportJSON(treatments, meds, animals, weightLogs) {
+// ─── Export / Import ─────────────────────────────────────────
+export function exportJSON(treatments, meds, animals, exams, metricDefs) {
   const payload = {
-    exportedAt: new Date().toISOString(), version: 3,
-    medications: meds, animals, treatments, weightLogs,
+    exportedAt: new Date().toISOString(), version: 4,
+    medications: meds, animals, treatments, exams, metricDefs,
   }
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
   download(blob, `vet-tracker-export-${dateStr()}.json`)
 }
 
 export function exportCSV(treatments) {
-  const header = 'Timestamp,Animal Name,Weight (kg),Weight (lbs),Medication,Dose (mL)'
+  const header = 'Timestamp,Animal Name,Medication,Dose (mL)'
   const rows   = treatments.map(t =>
-    [t.timestamp, `"${t.animalName}"`, t.weight_kg, t.weight_lbs, `"${t.medication}"`, t.dose].join(',')
+    [t.timestamp, `"${t.animalName}"`, `"${t.medication}"`, t.dose].join(',')
   )
   const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
   download(blob, `vet-tracker-export-${dateStr()}.csv`)
@@ -276,34 +351,29 @@ export async function importJSON(file, useSupabase) {
     reader.onload = async e => {
       try {
         const parsed = JSON.parse(e.target.result)
-        const { treatments = [], medications = [], animals = [], weightLogs = [] } = parsed
+        const { treatments = [], medications = [], animals = [], exams = [], metricDefs = [] } = parsed
         if (useSupabase) {
           if (medications.length)
             await supabase.from('medications').upsert(
-              medications.map(m => ({ name: m.name, factor: m.factor, concentration: m.concentration || null, indication: m.indication || null })),
+              medications.map(m => ({ name: m.name, factor: m.factor, concentration: m.concentration||null, indication: m.indication||null })),
               { onConflict: 'name' }
             )
           if (animals.length)
             await supabase.from('animals').upsert(
-              animals.map(a => ({ name: a.name, photo_url: a.photo_url || null, notes: a.notes || null })),
+              animals.map(a => ({ name: a.name, photo_url: a.photo_url||null, notes: a.notes||null })),
               { onConflict: 'name' }
-            )
-          if (weightLogs.length)
-            await supabase.from('weight_logs').insert(
-              weightLogs.map(w => ({ animal_name: w.animal_name, weight_kg: w.weight_kg, recorded_at: w.recorded_at || new Date().toISOString() }))
             )
           if (treatments.length)
             await supabase.from('treatments').insert(
               treatments.map(t => ({
                 animal_name: t.animalName,
-                weight_kg:   t.weight_kg ?? toKg(t.weight ?? 0),
                 medication:  t.medication,
                 dose:        t.dose,
                 created_at:  t.timestamp ? new Date(t.timestamp).toISOString() : new Date().toISOString(),
               }))
             )
         }
-        resolve({ treatments, medications, animals, weightLogs })
+        resolve({ treatments, medications, animals, exams, metricDefs })
       } catch(err) { reject(err) }
     }
     reader.readAsText(file)

@@ -1,12 +1,13 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import {
-  checkSupabase, loadMeds, loadTreatments, loadAnimals, loadWeightLogs,
+  checkSupabase, loadMeds, loadTreatments, loadAnimals,
+  loadExams, loadLatestExams, saveExam, deleteExam,
+  loadMetricDefs, saveMetricDefs, addMetricDef, deleteMetricDef,
   addTreatment, addMed, updateMed, deleteMed, saveMeds,
   upsertAnimal, uploadAnimalPhoto,
-  addWeightLog, deleteWeightLog,
   saveTreatmentsLocal, loadSettings, saveSettings,
   exportJSON, exportCSV, importJSON, parseMedCSV,
-  toKg, toLbs, DEFAULT_MEDS,
+  toKg, toLbs,
 } from './lib/dataService'
 
 const PALETTE = ['#7c9e87','#6b8fa8','#b08a6e','#9b7eb0','#c47c7c','#a89b6b','#6b9ea8','#a86b8a','#7ea87c','#a87c6b','#8a7ca8','#6ba88a']
@@ -18,123 +19,102 @@ function calcDose(weightKg, medName, meds) {
   return (parseFloat(weightKg) * med.factor).toFixed(2)
 }
 
-// ─── Weight Line Chart (pure SVG, no deps) ────────────────────────────────────
-function WeightChart({ entries, isKg, range, onRangeChange }) {
-  const W = 560, H = 180, PAD = { top: 16, right: 16, bottom: 36, left: 44 }
-  const chartW = W - PAD.left - PAD.right
-  const chartH = H - PAD.top  - PAD.bottom
+// ─── Metric chart (SVG) ───────────────────────────────────────
+function MetricChart({ exams, metricKey, unit, isKg }) {
   const [tooltip, setTooltip] = useState(null)
+  const W = 560, H = 160, PAD = { top: 14, right: 14, bottom: 32, left: 44 }
+  const cW = W - PAD.left - PAD.right
+  const cH = H - PAD.top  - PAD.bottom
 
-  const filtered = useMemo(() => {
-    if (range === 'all' || entries.length === 0) return entries
-    const cutoff = new Date()
-    cutoff.setDate(cutoff.getDate() - (range === '30d' ? 30 : 90))
-    return entries.filter(e => new Date(e.recorded_at) >= cutoff)
-  }, [entries, range])
+  const points = useMemo(() => {
+    return exams
+      .filter(e => e.metrics.some(m => m.metric === metricKey))
+      .map(e => {
+        const m = e.metrics.find(m => m.metric === metricKey)
+        let val = m.value
+        // Convert weight display unit
+        if (metricKey === 'weight_kg' && !isKg) val = toLbs(val)
+        return { val, label: e.label, recorded_at: e.recorded_at }
+      })
+      .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
+  }, [exams, metricKey, isKg])
 
-  if (filtered.length === 0) return (
-    <div style={{ textAlign:'center', padding:'32px 0', color:'#9a8a7a', fontSize:'13px' }}>
-      No weight data for this range.
+  if (points.length < 2) return (
+    <div style={{ textAlign:'center', padding:'24px 0', color:'#9a8a7a', fontSize:'13px' }}>
+      {points.length === 0 ? `No ${unit} data recorded yet.` : `Need at least 2 data points to show a chart.`}
     </div>
   )
 
-  const vals   = filtered.map(e => isKg ? e.weight_kg : e.weight_lbs)
-  const minVal = Math.min(...vals)
-  const maxVal = Math.max(...vals)
+  const vals   = points.map(p => p.val)
+  const minVal = Math.min(...vals), maxVal = Math.max(...vals)
   const spread = maxVal - minVal || 0.5
-  const padV   = spread * 0.15
-
-  const xOf = i => PAD.left + (i / Math.max(filtered.length - 1, 1)) * chartW
-  const yOf = v  => PAD.top  + chartH - ((v - (minVal - padV)) / (spread + padV * 2)) * chartH
-
-  const points = filtered.map((e, i) => ({ x: xOf(i), y: yOf(isKg ? e.weight_kg : e.weight_lbs), entry: e }))
-  const polyline = points.map(p => `${p.x},${p.y}`).join(' ')
-
-  // Y axis ticks
-  const tickCount = 4
+  const padV   = spread * 0.18
+  const xOf = i  => PAD.left + (i / Math.max(points.length - 1, 1)) * cW
+  const yOf = v  => PAD.top  + cH - ((v - (minVal - padV)) / (spread + padV * 2)) * cH
+  const ptCoords = points.map((p, i) => ({ x: xOf(i), y: yOf(p.val), p }))
+  const polyline = ptCoords.map(p => `${p.x},${p.y}`).join(' ')
+  const tickCount = 3
   const yTicks = Array.from({ length: tickCount + 1 }, (_, i) => {
     const v = (minVal - padV) + ((spread + padV * 2) * i / tickCount)
-    return { v: Math.round(v * 10) / 10, y: PAD.top + chartH - (i / tickCount) * chartH }
+    return { v: Math.round(v * 10) / 10, y: PAD.top + cH - (i / tickCount) * cH }
   })
+  const xLabelIdx = points.length <= 5
+    ? points.map((_, i) => i)
+    : [0,1,2,3,4].map(i => Math.round(i * (points.length - 1) / 4))
 
-  // X axis labels — show up to 6 evenly spaced
-  const xLabelIdx = filtered.length <= 6
-    ? filtered.map((_, i) => i)
-    : [0,1,2,3,4,5].map(i => Math.round(i * (filtered.length - 1) / 5))
+  const displayUnit = metricKey === 'weight_kg' ? (isKg ? 'kg' : 'lbs') : unit
 
   return (
-    <div style={{ position:'relative' }}>
-      <div style={{ display:'flex', gap:'6px', marginBottom:'10px', justifyContent:'flex-end' }}>
-        {[['30d','30d'],['90d','90d'],['all','All']].map(([val, label]) => (
-          <button key={val} onClick={() => onRangeChange(val)}
-            style={{ ...S.toggleBtn, ...(range === val ? S.toggleBtnActive : {}), padding:'3px 10px', fontSize:'11px' }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', overflow:'visible' }}
-        onMouseLeave={() => setTooltip(null)}>
-        {/* Grid lines */}
-        {yTicks.map((t, i) => (
-          <line key={i} x1={PAD.left} y1={t.y} x2={PAD.left + chartW} y2={t.y}
-            stroke="#ede6dd" strokeWidth="1" />
-        ))}
-        {/* Y axis labels */}
-        {yTicks.map((t, i) => (
-          <text key={i} x={PAD.left - 6} y={t.y + 4} textAnchor="end"
-            fontSize="10" fill="#9a8a7a">{t.v}</text>
-        ))}
-        {/* X axis labels */}
-        {xLabelIdx.map(i => (
-          <text key={i} x={xOf(i)} y={H - 6} textAnchor="middle"
-            fontSize="9" fill="#9a8a7a">
-            {filtered[i]?.label || ''}
-          </text>
-        ))}
-        {/* Area fill */}
-        <polygon
-          points={`${PAD.left},${PAD.top + chartH} ${polyline} ${PAD.left + chartW},${PAD.top + chartH}`}
-          fill="#3d6b52" fillOpacity="0.08" />
-        {/* Line */}
-        <polyline points={polyline} fill="none" stroke="#3d6b52" strokeWidth="2.5"
-          strokeLinejoin="round" strokeLinecap="round" />
-        {/* Dots + hover targets */}
-        {points.map((p, i) => (
-          <g key={i}>
-            <circle cx={p.x} cy={p.y} r="4" fill="#3d6b52" stroke="#fff" strokeWidth="1.5" />
-            <circle cx={p.x} cy={p.y} r="14" fill="transparent"
-              onMouseEnter={() => setTooltip({ ...p, i })}
-              style={{ cursor:'crosshair' }} />
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', overflow:'visible' }}
+      onMouseLeave={() => setTooltip(null)}>
+      {yTicks.map((t,i) => (
+        <g key={i}>
+          <line x1={PAD.left} y1={t.y} x2={PAD.left+cW} y2={t.y} stroke="#ede6dd" strokeWidth="1" />
+          <text x={PAD.left-5} y={t.y+4} textAnchor="end" fontSize="9" fill="#9a8a7a">{t.v}</text>
+        </g>
+      ))}
+      {xLabelIdx.map(i => (
+        <text key={i} x={xOf(i)} y={H-4} textAnchor="middle" fontSize="9" fill="#9a8a7a">
+          {points[i]?.label}
+        </text>
+      ))}
+      <polygon
+        points={`${PAD.left},${PAD.top+cH} ${polyline} ${PAD.left+cW},${PAD.top+cH}`}
+        fill="#3d6b52" fillOpacity="0.07" />
+      <polyline points={polyline} fill="none" stroke="#3d6b52" strokeWidth="2.5"
+        strokeLinejoin="round" strokeLinecap="round" />
+      {ptCoords.map((p, i) => (
+        <g key={i}>
+          <circle cx={p.x} cy={p.y} r="4" fill="#3d6b52" stroke="#fff" strokeWidth="1.5" />
+          <circle cx={p.x} cy={p.y} r="14" fill="transparent" style={{ cursor:'crosshair' }}
+            onMouseEnter={() => setTooltip(p)} />
+        </g>
+      ))}
+      {tooltip && (() => {
+        const tx = Math.min(Math.max(tooltip.x, PAD.left+32), PAD.left+cW-32)
+        const ty = tooltip.y > PAD.top+36 ? tooltip.y-34 : tooltip.y+14
+        return (
+          <g>
+            <rect x={tx-36} y={ty-13} width="72" height="26" rx="6" fill="#2a3d30" opacity="0.92" />
+            <text x={tx} y={ty} textAnchor="middle" fontSize="12" fontWeight="700" fill="#e8f5ec">
+              {tooltip.p.val} {displayUnit}
+            </text>
+            <text x={tx} y={ty+11} textAnchor="middle" fontSize="9" fill="#9ac8b0">{tooltip.p.label}</text>
           </g>
-        ))}
-        {/* Tooltip */}
-        {tooltip && (() => {
-          const val  = isKg ? tooltip.entry.weight_kg : tooltip.entry.weight_lbs
-          const unit = isKg ? 'kg' : 'lbs'
-          const tx   = Math.min(Math.max(tooltip.x, PAD.left + 30), PAD.left + chartW - 30)
-          const ty   = tooltip.y > PAD.top + 40 ? tooltip.y - 36 : tooltip.y + 16
-          return (
-            <g>
-              <rect x={tx - 32} y={ty - 14} width="64" height="28" rx="6"
-                fill="#2a3d30" opacity="0.92" />
-              <text x={tx} y={ty + 1} textAnchor="middle" fontSize="12"
-                fontWeight="700" fill="#e8f5ec">{val} {unit}</text>
-              <text x={tx} y={ty + 12} textAnchor="middle" fontSize="9"
-                fill="#9ac8b0">{tooltip.entry.label}</text>
-            </g>
-          )
-        })()}
-      </svg>
-    </div>
+        )
+      })()}
+    </svg>
   )
 }
 
-// ─── App ──────────────────────────────────────────────────────────────────────
+// ─── App ──────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab]           = useState('calculator')
   const [meds, setMeds]         = useState([])
   const [log, setLog]           = useState([])
   const [animals, setAnimals]   = useState([])
+  const [latestExams, setLatestExams] = useState({}) // { animalName: exam }
+  const [metricDefs, setMetricDefs]   = useState([])
   const [settings, setSettings] = useState({ weightUnit: 'kg' })
   const [useSupabase, setUseSupabase] = useState(false)
   const [dbStatus, setDbStatus] = useState('checking')
@@ -151,35 +131,46 @@ export default function App() {
   const [showSuggestions, setShowSuggestions] = useState(false)
 
   // Animal profile
-  const [selectedAnimal, setSelectedAnimal] = useState(null)
-  const [animalWeightLogs, setAnimalWeightLogs] = useState([])
-  const [weightRange, setWeightRange]   = useState('all')
-  const [editingAnimal, setEditingAnimal] = useState(null)
-  const [photoUploading, setPhotoUploading] = useState(false)
-  // Log weight form inside profile
-  const [logWeightInput, setLogWeightInput] = useState('')
-  const [logWeightDate, setLogWeightDate]   = useState('')
+  const [selectedAnimal, setSelectedAnimal]   = useState(null)
+  const [animalExams, setAnimalExams]         = useState([])
+  const [editingAnimal, setEditingAnimal]     = useState(null)
+  const [photoUploading, setPhotoUploading]   = useState(false)
+  const [activeChartMetric, setActiveChartMetric] = useState('weight_kg')
+
+  // New exam form
+  const [examDate, setExamDate]         = useState('')
+  const [examNotes, setExamNotes]       = useState('')
+  const [examMetrics, setExamMetrics]   = useState({}) // { key: value }
+
+  // Metric def manager
+  const [showMetricForm, setShowMetricForm] = useState(false)
+  const [newMetricKey, setNewMetricKey]     = useState('')
+  const [newMetricLabel, setNewMetricLabel] = useState('')
+  const [newMetricUnit, setNewMetricUnit]   = useState('')
+  const [newMetricIsDoseWeight, setNewMetricIsDoseWeight] = useState(false)
 
   // Med manager
-  const [newMedName, setNewMedName]     = useState('')
+  const [newMedName, setNewMedName]   = useState('')
   const [newMedFactor, setNewMedFactor] = useState('')
-  const [newMedConc, setNewMedConc]     = useState('')
-  const [newMedIndic, setNewMedIndic]   = useState('')
-  const [editingMed, setEditingMed]     = useState(null)
+  const [newMedConc, setNewMedConc]   = useState('')
+  const [newMedIndic, setNewMedIndic] = useState('')
+  const [editingMed, setEditingMed]   = useState(null)
 
   const importRef    = useRef(null)
   const csvImportRef = useRef(null)
   const photoRef     = useRef(null)
 
-  // ── Init ────────────────────────────────────────────────────────────────────
+  // ── Init ────────────────────────────────────────────────────
   useEffect(() => {
     async function init() {
       const sb = await checkSupabase()
       setUseSupabase(sb); setDbStatus(sb ? 'connected' : 'local')
-      const [medsData, logData, animalsData] = await Promise.all([
+      const [medsData, logData, animalsData, latestExamsData, metricDefsData] = await Promise.all([
         loadMeds(sb), loadTreatments(sb), loadAnimals(sb),
+        loadLatestExams(sb), loadMetricDefs(sb),
       ])
       setMeds(medsData); setLog(logData); setAnimals(animalsData)
+      setLatestExams(latestExamsData); setMetricDefs(metricDefsData)
       setMedication(medsData[0]?.name || '')
       setSettings(loadSettings())
       setLoading(false)
@@ -192,13 +183,13 @@ export default function App() {
     if (!meds.find(m => m.name === medication) && meds.length) setMedication(meds[0].name)
   }, [meds])
 
-  // Load weight logs when opening animal profile
+  // Load exams when opening animal profile
   useEffect(() => {
     if (!selectedAnimal) return
-    loadWeightLogs(selectedAnimal.name, useSupabase).then(setAnimalWeightLogs)
+    loadExams(selectedAnimal.name, useSupabase).then(setAnimalExams)
   }, [selectedAnimal])
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────
   const isKg = settings.weightUnit === 'kg'
   function showNotif(msg, type = 'ok') {
     setNotif(msg); setNotifType(type)
@@ -220,12 +211,19 @@ export default function App() {
   const dose      = weightKg ? calcDose(weightKg, medication, meds) : null
   const activeMed = meds.find(m => m.name === medication)
 
+  // Dose weight metric key from metricDefs
+  const doseWeightMetric = metricDefs.find(d => d.is_dose_weight)?.key || 'weight_kg'
+
+  // Known animals: name → latest weight_kg from latest exam
   const knownAnimals = useMemo(() => {
     const map = {}
-    log.forEach(e => { map[e.animalName] = e.weight_kg })
+    Object.entries(latestExams).forEach(([name, exam]) => {
+      const wm = exam?.metrics?.find(m => m.metric === doseWeightMetric)
+      map[name] = wm ? wm.value : null
+    })
     animals.forEach(a => { if (!(a.name in map)) map[a.name] = null })
     return map
-  }, [log, animals])
+  }, [latestExams, animals, doseWeightMetric])
 
   const suggestions = useMemo(() => {
     if (!animalName.trim() || nameLocked) return []
@@ -251,28 +249,41 @@ export default function App() {
   const animalProfiles = useMemo(() => {
     const names = new Set([...Object.keys(animalHistory), ...animals.map(a => a.name)])
     return Array.from(names).sort().map(name => {
-      const profile = animals.find(a => a.name === name) || {}
-      const history = animalHistory[name] || []
-      return { name, photo_url: profile.photo_url || null, notes: profile.notes || '', id: profile.id, history }
+      const profile    = animals.find(a => a.name === name) || {}
+      const history    = animalHistory[name] || []
+      const latestExam = latestExams[name] || null
+      const weightMetric = latestExam?.metrics?.find(m => m.metric === doseWeightMetric)
+      return {
+        name,
+        photo_url:    profile.photo_url || null,
+        notes:        profile.notes || '',
+        id:           profile.id,
+        history,
+        latestExam,
+        latestWeightKg: weightMetric?.value || null,
+      }
     })
-  }, [animalHistory, animals])
+  }, [animalHistory, animals, latestExams, doseWeightMetric])
 
-  // ── Calculator ───────────────────────────────────────────────────────────────
+  // Metrics available in any exam for this animal (for chart tabs)
+  const examMetricKeys = useMemo(() => {
+    const keys = new Set()
+    animalExams.forEach(e => e.metrics.forEach(m => keys.add(m.metric)))
+    return Array.from(keys)
+  }, [animalExams])
+
+  // ── Calculator ───────────────────────────────────────────────
   async function handleSave() {
     if (!animalName.trim() || !weightKg || !dose) { showNotif('⚠ Please fill in all fields.', 'warn'); return }
     const entry = {
       id: Date.now(), timestamp: new Date().toLocaleString(),
-      animalName: animalName.trim(), weight_kg: weightKg,
-      weight_lbs: toLbs(weightKg), medication, dose: parseFloat(dose), notes: '',
+      animalName: animalName.trim(), medication, dose: parseFloat(dose), notes: '',
     }
     const saved = await addTreatment(entry, useSupabase)
-    // Ensure animal exists
     if (!animals.find(a => a.name === entry.animalName)) {
       await upsertAnimal({ name: entry.animalName }, useSupabase)
       setAnimals(prev => [...prev, { name: entry.animalName, photo_url: null, notes: '' }])
     }
-    // Also log the weight
-    await addWeightLog({ animal_name: entry.animalName, weight_kg: weightKg }, useSupabase)
     setLog(prev => [saved, ...prev])
     showNotif(`✓ ${saved.animalName} · ${saved.medication.split(' ')[0]} · ${saved.dose} mL`)
     setNameLocked(true); setWeightLocked(true)
@@ -283,23 +294,59 @@ export default function App() {
     setNameLocked(false); setWeightLocked(false)
   }
 
-  // ── Log standalone weight ────────────────────────────────────────────────────
-  async function handleLogWeight(animalName) {
-    const kg = inputToKg(logWeightInput)
-    if (!kg || kg <= 0) { showNotif('⚠ Enter a valid weight.', 'warn'); return }
-    const recorded_at = logWeightDate ? new Date(logWeightDate).toISOString() : new Date().toISOString()
-    const saved = await addWeightLog({ animal_name: animalName, weight_kg: kg, recorded_at }, useSupabase)
-    setAnimalWeightLogs(prev => [...prev, saved].sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at)))
-    setLogWeightInput(''); setLogWeightDate('')
-    showNotif(`✓ Weight logged: ${kg} kg`)
+  // ── Exams ────────────────────────────────────────────────────
+  async function handleSaveExam(animalName) {
+    const metrics = Object.entries(examMetrics)
+      .filter(([_, v]) => v !== '' && !isNaN(parseFloat(v)))
+      .map(([key, val]) => {
+        const def = metricDefs.find(d => d.key === key)
+        // Convert display unit back to kg for storage
+        let value = parseFloat(val)
+        if (key === 'weight_kg' && !isKg) value = toKg(value)
+        return { metric: key, value, unit: def?.unit || '' }
+      })
+    if (!metrics.length) { showNotif('⚠ Enter at least one metric.', 'warn'); return }
+    const recorded_at = examDate ? new Date(examDate).toISOString() : new Date().toISOString()
+    const exam = await saveExam({ animal_name: animalName, recorded_at, notes: examNotes, metrics }, useSupabase)
+    setAnimalExams(prev => [exam, ...prev])
+    // Update latestExams if this is newer
+    const current = latestExams[animalName]
+    if (!current || new Date(exam.recorded_at) >= new Date(current.recorded_at)) {
+      setLatestExams(prev => ({ ...prev, [animalName]: exam }))
+    }
+    setExamMetrics({}); setExamDate(''); setExamNotes('')
+    showNotif('✓ Exam saved')
   }
 
-  async function handleDeleteWeightLog(id) {
-    await deleteWeightLog(id, useSupabase)
-    setAnimalWeightLogs(prev => prev.filter(r => r.id !== id))
+  async function handleDeleteExam(id) {
+    await deleteExam(id, useSupabase)
+    setAnimalExams(prev => prev.filter(e => e.id !== id))
   }
 
-  // ── Medications ───────────────────────────────────────────────────────────────
+  // ── Metric defs ──────────────────────────────────────────────
+  async function handleAddMetricDef() {
+    const key = newMetricKey.trim().toLowerCase().replace(/\s+/g, '_')
+    if (!key || !newMetricLabel.trim()) { showNotif('⚠ Key and label required.', 'warn'); return }
+    if (metricDefs.find(d => d.key === key)) { showNotif('⚠ Metric key already exists.', 'warn'); return }
+    const def = {
+      key, label: newMetricLabel.trim(), unit: newMetricUnit.trim(),
+      is_dose_weight: newMetricIsDoseWeight, display_order: metricDefs.length + 1,
+    }
+    const saved = await addMetricDef(def, useSupabase)
+    const updated = [...metricDefs, saved]
+    setMetricDefs(updated); saveMetricDefs(updated, false)
+    setNewMetricKey(''); setNewMetricLabel(''); setNewMetricUnit(''); setNewMetricIsDoseWeight(false)
+    setShowMetricForm(false)
+    showNotif(`✓ Added metric: ${def.label}`)
+  }
+
+  async function handleDeleteMetricDef(key) {
+    await deleteMetricDef(key, useSupabase)
+    const updated = metricDefs.filter(d => d.key !== key)
+    setMetricDefs(updated); saveMetricDefs(updated, false)
+  }
+
+  // ── Medications ──────────────────────────────────────────────
   async function handleAddMed() {
     const name = newMedName.trim(); const factor = parseFloat(newMedFactor)
     if (!name || isNaN(factor) || factor <= 0) { showNotif('⚠ Enter a valid name and factor.', 'warn'); return }
@@ -316,7 +363,7 @@ export default function App() {
     setNewMedConc(meds[idx].concentration || ''); setNewMedIndic(meds[idx].indication || '')
   }
 
-  async function handleSaveEdit() {
+  async function handleSaveEditMed() {
     const name = newMedName.trim(); const factor = parseFloat(newMedFactor)
     if (!name || isNaN(factor) || factor <= 0) { showNotif('⚠ Enter valid values.', 'warn'); return }
     const updated = meds.map((m, i) => i === editingMed ? { ...m, name, factor, concentration: newMedConc.trim(), indication: newMedIndic.trim() } : m)
@@ -343,7 +390,7 @@ export default function App() {
     e.target.value = ''
   }
 
-  // ── Photos ────────────────────────────────────────────────────────────────────
+  // ── Photos ───────────────────────────────────────────────────
   async function handlePhotoUpload(e, name) {
     const file = e.target.files[0]; if (!file) return
     setPhotoUploading(true)
@@ -357,11 +404,11 @@ export default function App() {
     setPhotoUploading(false); e.target.value = ''
   }
 
-  // ── Import/Export ─────────────────────────────────────────────────────────────
+  // ── Import/Export ────────────────────────────────────────────
   async function handleImportJSON(e) {
     const file = e.target.files[0]; if (!file) return
     try {
-      const { treatments, medications, animals: imp, weightLogs } = await importJSON(file, useSupabase)
+      const { treatments, medications, animals: imp } = await importJSON(file, useSupabase)
       if (medications.length) { setMeds(medications); saveMeds(medications, false) }
       if (imp?.length) setAnimals(prev => {
         const names = new Set(prev.map(a => a.name))
@@ -376,7 +423,7 @@ export default function App() {
     e.target.value = ''
   }
 
-  // ── Chart data ────────────────────────────────────────────────────────────────
+  // ── Chart data ───────────────────────────────────────────────
   const medCounts = useMemo(() => {
     const c = {}; meds.forEach(m => { c[m.name] = 0 })
     log.forEach(e => { c[e.medication] = (c[e.medication] || 0) + 1 })
@@ -384,19 +431,19 @@ export default function App() {
   }, [log, meds])
   const maxCount = Math.max(...Object.values(medCounts), 1)
 
-  // ── Loading ───────────────────────────────────────────────────────────────────
   if (loading) return (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh', background:'#f4f0eb', fontFamily:'DM Sans,sans-serif', color:'#3d6b52', fontSize:'18px', fontWeight:700 }}>
       🐾 Loading...
     </div>
   )
 
-  // ── Animal Profile ────────────────────────────────────────────────────────────
+  // ── Animal Profile ────────────────────────────────────────────
   if (selectedAnimal) {
     const profile = animalProfiles.find(a => a.name === selectedAnimal.name) || selectedAnimal
     const history = profile.history || []
-    const lastTreatment = history[0]
-    const lastWeight = animalWeightLogs.length ? animalWeightLogs[animalWeightLogs.length - 1] : null
+    const latestExam = latestExams[profile.name]
+    const latestWeightKg = latestExam?.metrics?.find(m => m.metric === doseWeightMetric)?.value
+    const chartMetricDef = metricDefs.find(d => d.key === activeChartMetric)
 
     return (
       <div style={S.root}>
@@ -404,21 +451,20 @@ export default function App() {
         {notif && <div style={{ ...S.notif, background: notifType==='err'?'#7a2020':notifType==='warn'?'#6b5a20':'#2a3d30' }}>{notif}</div>}
 
         <header style={S.header}>
-          <button onClick={() => { setSelectedAnimal(null); setAnimalWeightLogs([]) }} style={S.backBtn}>← Back</button>
+          <button onClick={() => { setSelectedAnimal(null); setAnimalExams([]) }} style={S.backBtn}>← Back</button>
           <div style={S.logo}>🐱</div>
           <div>
             <div style={S.title}>{profile.name}</div>
             <div style={S.subtitle}>
-              {lastWeight ? `${isKg ? lastWeight.weight_kg+' kg' : lastWeight.weight_lbs+' lbs'}` : 'No weight recorded'}
+              {latestWeightKg ? `${isKg ? latestWeightKg+' kg' : toLbs(latestWeightKg)+' lbs'}` : 'No exam recorded'}
               {' · '}{history.length} treatment{history.length!==1?'s':''}
             </div>
           </div>
           <button onClick={() => {
             setAnimalName(profile.name)
-            if (lastWeight) setWeightInput(String(isKg ? lastWeight.weight_kg : lastWeight.weight_lbs))
-            else if (lastTreatment) setWeightInput(String(isKg ? lastTreatment.weight_kg : lastTreatment.weight_lbs))
-            setNameLocked(true); setWeightLocked(true)
-            setSelectedAnimal(null); setAnimalWeightLogs([]); setTab('calculator')
+            if (latestWeightKg) setWeightInput(String(isKg ? latestWeightKg : toLbs(latestWeightKg)))
+            setNameLocked(true); setWeightLocked(!!latestWeightKg)
+            setSelectedAnimal(null); setAnimalExams([]); setTab('calculator')
           }} style={{ ...S.editBtn, marginLeft:'auto' }}>+ Treat</button>
         </header>
 
@@ -438,8 +484,26 @@ export default function App() {
               {!useSupabase && <div style={{ fontSize:'10px', color:'#c47c7c', marginTop:'4px', textAlign:'center' }}>Needs Supabase</div>}
             </div>
             <div style={{ flex:1 }}>
+              {latestExam && (
+                <div style={{ marginBottom:'10px' }}>
+                  <div style={S.fieldLabel}>Latest Exam — {latestExam.label}</div>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:'8px' }}>
+                    {latestExam.metrics.map(m => {
+                      const def = metricDefs.find(d => d.key === m.metric)
+                      const displayVal = m.metric === 'weight_kg' && !isKg ? toLbs(m.value) : m.value
+                      const displayUnit = m.metric === 'weight_kg' ? (isKg ? 'kg' : 'lbs') : (def?.unit || m.unit || '')
+                      return (
+                        <div key={m.metric} style={S.miniStat}>
+                          <div style={S.miniStatNum}>{displayVal} <span style={{ fontSize:'10px', fontWeight:400 }}>{displayUnit}</span></div>
+                          <div style={S.miniStatLabel}>{def?.label || m.metric}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
               <div style={S.fieldLabel}>Notes</div>
-              <textarea style={{ ...S.input, minHeight:'70px', resize:'vertical', fontSize:'13px' }}
+              <textarea style={{ ...S.input, minHeight:'60px', resize:'vertical', fontSize:'13px' }}
                 placeholder="Notes about this animal..."
                 value={editingAnimal?.name === profile.name ? editingAnimal.notes : profile.notes}
                 onChange={e => setEditingAnimal({ name: profile.name, notes: e.target.value })}
@@ -450,77 +514,104 @@ export default function App() {
                     setEditingAnimal(null)
                   }
                 }} />
-              {lastWeight && (
-                <div style={{ marginTop:'10px', display:'flex', gap:'10px' }}>
-                  <div style={S.miniStat}><div style={S.miniStatNum}>{lastWeight.weight_kg} kg</div><div style={S.miniStatLabel}>Current</div></div>
-                  <div style={S.miniStat}><div style={S.miniStatNum}>{lastWeight.weight_lbs} lbs</div><div style={S.miniStatLabel}>In lbs</div></div>
-                  <div style={S.miniStat}><div style={S.miniStatNum}>{animalWeightLogs.length}</div><div style={S.miniStatLabel}>Weigh-ins</div></div>
-                </div>
-              )}
             </div>
           </div>
 
-          {/* Weight chart */}
-          <div style={S.card}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'12px' }}>
-              <h3 style={{ ...S.cardTitle, margin:0 }}>Weight Over Time</h3>
-              <span style={{ fontSize:'12px', color:'#9a8a7a' }}>{isKg ? 'kg' : 'lbs'}</span>
-            </div>
-            {animalWeightLogs.length >= 2
-              ? <WeightChart entries={animalWeightLogs} isKg={isKg} range={weightRange} onRangeChange={setWeightRange} />
-              : <p style={{ ...S.cardDesc, margin:0 }}>
-                  {animalWeightLogs.length === 1
-                    ? `One weigh-in recorded (${animalWeightLogs[0].weight_kg} kg). Log at least one more to see the chart.`
-                    : 'No weight data yet. Log a weight below or save a treatment.'}
-                </p>
-            }
-          </div>
-
-          {/* Log weight */}
-          <div style={S.card}>
-            <h3 style={S.cardTitle}>Log Weight</h3>
-            <div style={{ display:'flex', gap:'10px', alignItems:'flex-end' }}>
-              <div style={{ flex:1 }}>
-                <div style={S.fieldLabel}>Weight ({isKg ? 'kg' : 'lbs'})</div>
-                <input style={S.input} type="number" step="0.01"
-                  placeholder={isKg ? '4.20' : '9.3'}
-                  value={logWeightInput} onChange={e => setLogWeightInput(e.target.value)} />
+          {/* Charts — one per metric that has 2+ data points */}
+          {examMetricKeys.length > 0 && (
+            <div style={S.card}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px' }}>
+                <h3 style={{ ...S.cardTitle, margin:0 }}>Trends</h3>
+                {examMetricKeys.length > 1 && (
+                  <div style={{ display:'flex', gap:'4px', flexWrap:'wrap' }}>
+                    {examMetricKeys.map(key => {
+                      const def = metricDefs.find(d => d.key === key)
+                      return (
+                        <button key={key}
+                          style={{ ...S.toggleBtn, ...(activeChartMetric === key ? S.toggleBtnActive : {}), padding:'3px 10px', fontSize:'11px' }}
+                          onClick={() => setActiveChartMetric(key)}>
+                          {def?.label || key}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
+              <MetricChart
+                exams={animalExams}
+                metricKey={activeChartMetric}
+                unit={chartMetricDef?.unit || ''}
+                isKg={isKg}
+              />
+            </div>
+          )}
+
+          {/* Log new exam */}
+          <div style={S.card}>
+            <h3 style={S.cardTitle}>Log Exam</h3>
+            <div style={{ display:'flex', gap:'10px', marginBottom:'12px' }}>
               <div style={{ flex:1 }}>
                 <div style={S.fieldLabel}>Date (optional)</div>
-                <input style={S.input} type="date" value={logWeightDate}
-                  onChange={e => setLogWeightDate(e.target.value)} />
+                <input style={S.input} type="date" value={examDate} onChange={e => setExamDate(e.target.value)} />
               </div>
-              <button style={{ ...S.saveBtn, flex:'0 0 auto', width:'auto', padding:'10px 18px', fontSize:'13px' }}
-                onClick={() => handleLogWeight(profile.name)} className="save-btn">
-                Log
-              </button>
+              <div style={{ flex:2 }}>
+                <div style={S.fieldLabel}>Notes (optional)</div>
+                <input style={S.input} placeholder="e.g. Routine check" value={examNotes} onChange={e => setExamNotes(e.target.value)} />
+              </div>
             </div>
+
+            {/* Metric inputs — one per defined metric */}
+            <div style={S.metricGrid}>
+              {metricDefs.map(def => {
+                const displayLabel = def.key === 'weight_kg'
+                  ? `${def.label} (${isKg ? 'kg' : 'lbs'})`
+                  : `${def.label}${def.unit ? ` (${def.unit})` : ''}`
+                return (
+                  <div key={def.key}>
+                    <div style={S.fieldLabel}>{displayLabel}</div>
+                    <input style={S.input} type="number" step="0.01"
+                      placeholder={def.key === 'weight_kg' ? (isKg ? '4.2' : '9.3') : ''}
+                      value={examMetrics[def.key] || ''}
+                      onChange={e => setExamMetrics(prev => ({ ...prev, [def.key]: e.target.value }))} />
+                  </div>
+                )
+              })}
+            </div>
+            <button style={{ ...S.saveBtn, marginTop:'12px' }}
+              onClick={() => handleSaveExam(profile.name)} className="save-btn">
+              Save Exam
+            </button>
           </div>
 
-          {/* Weight log table */}
-          {animalWeightLogs.length > 0 && (
+          {/* Exam history */}
+          {animalExams.length > 0 && (
             <div style={S.card}>
-              <h3 style={{ ...S.cardTitle, marginBottom:'10px' }}>All Weigh-ins</h3>
-              <div style={{ overflowX:'auto' }}>
-                <table style={S.table}>
-                  <thead><tr>
-                    {['Date','kg','lbs',''].map(h => <th key={h} style={S.th}>{h}</th>)}
-                  </tr></thead>
-                  <tbody>
-                    {[...animalWeightLogs].reverse().map(e => (
-                      <tr key={e.id} style={S.tr}>
-                        <td style={S.td}>{e.label}</td>
-                        <td style={{ ...S.td, fontWeight:600 }}>{e.weight_kg}</td>
-                        <td style={S.td}>{e.weight_lbs}</td>
-                        <td style={S.td}>
-                          <button onClick={() => handleDeleteWeightLog(e.id)}
-                            style={{ ...S.actionBtnRed, padding:'2px 7px', fontSize:'11px' }}>✕</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <h3 style={S.cardTitle}>Exam History</h3>
+              <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+                {animalExams.map(exam => (
+                  <div key={exam.id} style={S.examRow}>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:700, fontSize:'13px', marginBottom:'5px' }}>{exam.label}
+                        {exam.notes && <span style={{ fontWeight:400, color:'#9a8a7a', marginLeft:'8px', fontSize:'12px' }}>{exam.notes}</span>}
+                      </div>
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:'6px' }}>
+                        {exam.metrics.map(m => {
+                          const def = metricDefs.find(d => d.key === m.metric)
+                          const displayVal = m.metric === 'weight_kg' && !isKg ? toLbs(m.value) : m.value
+                          const displayUnit = m.metric === 'weight_kg' ? (isKg ? 'kg' : 'lbs') : (def?.unit || m.unit || '')
+                          return (
+                            <span key={m.metric} style={S.examMetricBadge}>
+                              <span style={{ color:'#9a8a7a', fontSize:'10px' }}>{def?.label || m.metric}</span>
+                              {' '}<strong>{displayVal}</strong> {displayUnit}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    </div>
+                    <button onClick={() => handleDeleteExam(exam.id)}
+                      style={{ ...S.actionBtnRed, padding:'3px 8px', fontSize:'11px', alignSelf:'flex-start' }}>✕</button>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -533,13 +624,12 @@ export default function App() {
               <div style={{ overflowX:'auto' }}>
                 <table style={S.table}>
                   <thead><tr>
-                    {['Date', isKg?'kg':'lbs', 'Medication','Dose (mL)'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                    {['Date','Medication','Dose (mL)'].map(h => <th key={h} style={S.th}>{h}</th>)}
                   </tr></thead>
                   <tbody>
                     {history.map(e => (
                       <tr key={e.id} style={S.tr}>
                         <td style={S.td}>{e.timestamp}</td>
-                        <td style={S.td}>{isKg ? e.weight_kg : e.weight_lbs}</td>
                         <td style={S.td}>
                           <span style={{ ...S.medTag, background:getMedColor(meds,e.medication)+'22', color:getMedColor(meds,e.medication), borderColor:getMedColor(meds,e.medication)+'55' }}>
                             {e.medication}
@@ -559,7 +649,7 @@ export default function App() {
     )
   }
 
-  // ── Main App ──────────────────────────────────────────────────────────────────
+  // ── Main App ──────────────────────────────────────────────────
   return (
     <div style={S.root}>
       <style>{css}</style>
@@ -600,7 +690,9 @@ export default function App() {
               )}
             </div>
             <p style={S.cardDesc}>
-              {nameLocked ? `Locked on ${animalName} — change med and save again.` : 'Type a name to auto-fill last weight.'}
+              {nameLocked
+                ? `Locked on ${animalName}${weightLocked ? ` (${weightInput} ${isKg?'kg':'lbs'} from latest exam)` : ''} — change med and save again.`
+                : 'Type a name to auto-fill weight from latest exam.'}
             </p>
 
             <div style={{ position:'relative', marginBottom:'14px' }}>
@@ -628,7 +720,7 @@ export default function App() {
 
             <div style={{ marginBottom:'14px' }}>
               <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'6px' }}>
-                <div style={S.fieldLabel}>Body Weight ({isKg ? 'kg' : 'lbs'})</div>
+                <div style={S.fieldLabel}>Body Weight ({isKg?'kg':'lbs'})</div>
                 {weightLocked && <button onClick={() => setWeightLocked(false)} style={S.editBtn}>✎ Edit</button>}
                 {weightInput && weightKg && (
                   <div style={{ marginLeft:'auto', fontSize:'11px', color:'#9a8a7a' }}>
@@ -660,7 +752,7 @@ export default function App() {
               <div style={S.doseValue}>{dose ? `${dose} mL` : '—'}</div>
               {dose && activeMed && (
                 <div style={S.doseFormula}>
-                  {weightInput} {isKg?'kg':'lbs'} {!isKg && `(${weightKg} kg)`} × {activeMed.factor} = {dose} mL
+                  {weightInput} {isKg?'kg':'lbs'} {!isKg&&`(${weightKg} kg)`} × {activeMed.factor} = {dose} mL
                 </div>
               )}
             </div>
@@ -676,39 +768,43 @@ export default function App() {
           <div>
             <div style={S.card}>
               <h2 style={S.cardTitle}>Animals</h2>
-              <p style={S.cardDesc}>{animalProfiles.length === 0 ? 'No animals yet — save a treatment to add one.' : `${animalProfiles.length} animal${animalProfiles.length!==1?'s':''} tracked.`}</p>
+              <p style={S.cardDesc}>{animalProfiles.length === 0 ? 'No animals yet.' : `${animalProfiles.length} animal${animalProfiles.length!==1?'s':''} tracked.`}</p>
             </div>
             <div style={S.animalGrid}>
-              {animalProfiles.map(profile => {
-                const last = profile.history[0]
-                return (
-                  <div key={profile.name} style={{ ...S.animalCard, cursor:'pointer' }}
-                    onClick={() => { setSelectedAnimal(profile); setWeightRange('all') }}
-                    className="animal-card">
-                    <div style={S.animalCardPhoto}>
-                      {profile.photo_url
-                        ? <img src={profile.photo_url} alt={profile.name} style={S.animalThumb} />
-                        : <div style={S.animalThumbPlaceholder}>🐱</div>
-                      }
-                    </div>
-                    <div style={{ flex:1, minWidth:0 }}>
-                      <div style={S.animalName}>{profile.name}</div>
-                      <div style={S.animalMeta}>
-                        {last ? (isKg ? `${last.weight_kg} kg` : `${last.weight_lbs} lbs`) : 'No weight'}
-                        {' · '}{profile.history.length} treatment{profile.history.length!==1?'s':''}
-                      </div>
-                      <div style={{ display:'flex', flexWrap:'wrap', gap:'4px', marginTop:'6px' }}>
-                        {[...new Set(profile.history.slice(0,3).map(e => e.medication))].map(med => (
-                          <span key={med} style={{ ...S.medTag, background:getMedColor(meds,med)+'22', color:getMedColor(meds,med), borderColor:getMedColor(meds,med)+'55', fontSize:'10px' }}>
-                            {med.split(' ')[0]}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div style={{ color:'#ccc', fontSize:'18px', alignSelf:'center' }}>›</div>
+              {animalProfiles.map(profile => (
+                <div key={profile.name} style={{ ...S.animalCard, cursor:'pointer' }}
+                  onClick={() => { setSelectedAnimal(profile); setActiveChartMetric('weight_kg') }}
+                  className="animal-card">
+                  <div style={S.animalCardPhoto}>
+                    {profile.photo_url
+                      ? <img src={profile.photo_url} alt={profile.name} style={S.animalThumb} />
+                      : <div style={S.animalThumbPlaceholder}>🐱</div>
+                    }
                   </div>
-                )
-              })}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={S.animalName}>{profile.name}</div>
+                    <div style={S.animalMeta}>
+                      {profile.latestWeightKg
+                        ? (isKg ? `${profile.latestWeightKg} kg` : `${toLbs(profile.latestWeightKg)} lbs`)
+                        : 'No exam recorded'}
+                      {' · '}{profile.history.length} treatment{profile.history.length!==1?'s':''}
+                    </div>
+                    {profile.latestExam && (
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:'4px', marginTop:'5px' }}>
+                        {profile.latestExam.metrics.slice(0,3).map(m => {
+                          const def = metricDefs.find(d => d.key === m.metric)
+                          return (
+                            <span key={m.metric} style={{ ...S.examMetricBadge, fontSize:'10px' }}>
+                              {def?.label || m.metric}: {m.metric==='weight_kg'&&!isKg ? toLbs(m.value) : m.value} {m.metric==='weight_kg'?(isKg?'kg':'lbs'):(def?.unit||'')}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ color:'#ccc', fontSize:'18px', alignSelf:'center' }}>›</div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -718,23 +814,22 @@ export default function App() {
           <div>
             <div style={S.card}>
               <h2 style={S.cardTitle}>Treatment Log</h2>
-              <p style={S.cardDesc}>{log.length === 0 ? 'No treatments recorded yet.' : `${log.length} treatment${log.length!==1?'s':''} · ${animalProfiles.length} animal${animalProfiles.length!==1?'s':''}`}</p>
+              <p style={S.cardDesc}>{log.length === 0 ? 'No treatments recorded yet.' : `${log.length} treatment${log.length!==1?'s':''}`}</p>
             </div>
             {log.length > 0 && (
               <div style={S.card}>
                 <div style={{ overflowX:'auto' }}>
                   <table style={S.table}>
                     <thead><tr>
-                      {['Timestamp','Animal',isKg?'kg':'lbs','Medication','Dose (mL)'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                      {['Timestamp','Animal','Medication','Dose (mL)'].map(h => <th key={h} style={S.th}>{h}</th>)}
                     </tr></thead>
                     <tbody>
                       {log.map(e => (
                         <tr key={e.id} style={{ ...S.tr, cursor:'pointer' }}
-                          onClick={() => { setSelectedAnimal({ name: e.animalName }); setWeightRange('all') }}
+                          onClick={() => { setSelectedAnimal({ name: e.animalName }); setActiveChartMetric('weight_kg') }}
                           className="log-row">
                           <td style={S.td}>{e.timestamp}</td>
                           <td style={{ ...S.td, fontWeight:600 }}>{e.animalName}</td>
-                          <td style={S.td}>{isKg ? e.weight_kg : e.weight_lbs}</td>
                           <td style={S.td}>
                             <span style={{ ...S.medTag, background:getMedColor(meds,e.medication)+'22', color:getMedColor(meds,e.medication), borderColor:getMedColor(meds,e.medication)+'55' }}>
                               {e.medication}
@@ -772,13 +867,6 @@ export default function App() {
                     <div style={S.barCount}>{medCounts[m.name]||0}</div>
                   </div>
                 ))}
-                {log.length === 0 && meds.slice(0,5).map(m => (
-                  <div key={m.name} style={S.barRow}>
-                    <div style={S.barLabel}>{m.name}</div>
-                    <div style={S.barTrack}><div style={{ ...S.barFill, width:'4%', background:getMedColor(meds,m.name), opacity:0.2 }} /></div>
-                    <div style={S.barCount}>0</div>
-                  </div>
-                ))}
               </div>
             </div>
             {log.length > 0 && (
@@ -786,7 +874,7 @@ export default function App() {
                 <h3 style={S.cardTitle}>Recent Activity</h3>
                 {log.slice(0,6).map(e => (
                   <div key={e.id} style={{ ...S.activityRow, cursor:'pointer' }}
-                    onClick={() => { setSelectedAnimal({ name: e.animalName }); setWeightRange('all') }}>
+                    onClick={() => { setSelectedAnimal({ name: e.animalName }); setActiveChartMetric('weight_kg') }}>
                     <div style={{ ...S.activityDot, background:getMedColor(meds,e.medication) }} />
                     <div style={{ flex:1 }}>
                       <span style={{ fontWeight:600 }}>{e.animalName}</span>
@@ -806,15 +894,62 @@ export default function App() {
         {/* ── MEDICATIONS ── */}
         {tab === 'meds' && (
           <div>
+            {/* Metric definitions */}
+            <div style={S.card}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'5px' }}>
+                <h2 style={{ ...S.cardTitle, margin:0 }}>Exam Metrics</h2>
+                <button style={S.editBtn} onClick={() => setShowMetricForm(f => !f)}>
+                  {showMetricForm ? 'Cancel' : '+ Add Metric'}
+                </button>
+              </div>
+              <p style={S.cardDesc}>Metrics captured during exams. The dose-weight metric is used for calculations.</p>
+              <div style={S.medList}>
+                {metricDefs.map(d => (
+                  <div key={d.key} style={S.medRow}>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:600, fontSize:'13px' }}>
+                        {d.label}
+                        {d.is_dose_weight && <span style={{ marginLeft:'6px', fontSize:'10px', background:'#eef6f1', color:'#3d6b52', border:'1px solid #b8d4c0', borderRadius:'10px', padding:'1px 7px' }}>dose weight</span>}
+                      </div>
+                      <div style={{ fontSize:'11px', color:'#9a8a7a' }}>key: {d.key}{d.unit && ` · unit: ${d.unit}`}</div>
+                    </div>
+                    {!d.is_dose_weight && (
+                      <button style={S.actionBtnRed} onClick={() => handleDeleteMetricDef(d.key)}>✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {showMetricForm && (
+                <div style={{ marginTop:'12px', display:'flex', flexDirection:'column', gap:'10px', padding:'14px', background:'#faf8f5', borderRadius:'10px', border:'1px solid #ede6dd' }}>
+                  <div style={{ display:'flex', gap:'10px' }}>
+                    <div style={{ flex:1 }}>
+                      <div style={S.fieldLabel}>Key (no spaces)</div>
+                      <input style={S.input} placeholder="e.g. muac_cm" value={newMetricKey} onChange={e => setNewMetricKey(e.target.value)} />
+                    </div>
+                    <div style={{ flex:1 }}>
+                      <div style={S.fieldLabel}>Label</div>
+                      <input style={S.input} placeholder="e.g. MUAC" value={newMetricLabel} onChange={e => setNewMetricLabel(e.target.value)} />
+                    </div>
+                    <div style={{ flex:'0 0 80px' }}>
+                      <div style={S.fieldLabel}>Unit</div>
+                      <input style={S.input} placeholder="cm" value={newMetricUnit} onChange={e => setNewMetricUnit(e.target.value)} />
+                    </div>
+                  </div>
+                  <button style={S.saveBtn} onClick={handleAddMetricDef} className="save-btn">Add Metric</button>
+                </div>
+              )}
+            </div>
+
+            {/* Medications */}
             <div style={S.card}>
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'5px' }}>
                 <h2 style={{ ...S.cardTitle, margin:0 }}>Medications</h2>
                 <div style={{ display:'flex', gap:'8px' }}>
                   <input type="file" accept=".csv" ref={csvImportRef} onChange={handleCSVImport} style={{ display:'none' }} />
-                  <button style={S.editBtn} onClick={() => csvImportRef.current.click()}>⬆ Import CSV</button>
+                  <button style={S.editBtn} onClick={() => csvImportRef.current.click()}>⬆ CSV</button>
                 </div>
               </div>
-              <p style={S.cardDesc}>All factors are mL per kg body weight.</p>
+              <p style={S.cardDesc}>Factors are mL per kg body weight.</p>
               <div style={S.medList}>
                 {meds.map((m, i) => (
                   <div key={m.name+i} style={S.medRow}>
@@ -829,7 +964,7 @@ export default function App() {
                           <input style={{ ...S.input, flex:1, fontSize:'12px', padding:'6px 10px' }} placeholder="Indication" value={newMedIndic} onChange={e => setNewMedIndic(e.target.value)} />
                         </div>
                         <div style={{ display:'flex', gap:'8px' }}>
-                          <button style={S.actionBtnGreen} onClick={handleSaveEdit}>Save</button>
+                          <button style={S.actionBtnGreen} onClick={handleSaveEditMed}>Save</button>
                           <button style={S.actionBtnGhost} onClick={() => { setEditingMed(null); setNewMedName(''); setNewMedFactor(''); setNewMedConc(''); setNewMedIndic('') }}>Cancel</button>
                         </div>
                       </div>
@@ -879,9 +1014,7 @@ export default function App() {
                   </div>
                 </div>
                 {newMedFactor && !isNaN(parseFloat(newMedFactor)) && parseFloat(newMedFactor) > 0 && (
-                  <div style={{ fontSize:'12px', color:'#7a6a5a' }}>
-                    Example: 4 kg cat → {(4 * parseFloat(newMedFactor)).toFixed(2)} mL
-                  </div>
+                  <div style={{ fontSize:'12px', color:'#7a6a5a' }}>Example: 4 kg → {(4*parseFloat(newMedFactor)).toFixed(2)} mL</div>
                 )}
                 <button style={S.saveBtn} onClick={handleAddMed} className="save-btn">Add Medication</button>
               </div>
@@ -898,7 +1031,7 @@ export default function App() {
               <div style={S.settingRow}>
                 <div>
                   <div style={{ fontWeight:600, fontSize:'14px' }}>Weight Unit</div>
-                  <div style={{ fontSize:'12px', color:'#9a8a7a', marginTop:'2px' }}>Default is kg. Calculations always use kg internally.</div>
+                  <div style={{ fontSize:'12px', color:'#9a8a7a', marginTop:'2px' }}>Default is kg. All calculations use kg internally.</div>
                 </div>
                 <div style={S.toggle}>
                   <button style={{ ...S.toggleBtn, ...(isKg ? S.toggleBtnActive : {}) }} onClick={() => updateSettings({ weightUnit:'kg' })}>kg</button>
@@ -909,7 +1042,7 @@ export default function App() {
                 <div>
                   <div style={{ fontWeight:600, fontSize:'14px' }}>Storage</div>
                   <div style={{ fontSize:'12px', color: dbStatus==='connected'?'#4ade80':'#fbbf24', marginTop:'2px' }}>
-                    {dbStatus === 'connected' ? '🟢 Connected to Supabase' : '🟡 Using localStorage (this device only)'}
+                    {dbStatus === 'connected' ? '🟢 Connected to Supabase' : '🟡 localStorage (this device only)'}
                   </div>
                 </div>
               </div>
@@ -917,9 +1050,9 @@ export default function App() {
             <div style={S.card}>
               <h3 style={S.cardTitle}>Export Data</h3>
               <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
-                <button style={S.exportBtn} onClick={() => exportJSON(log, meds, animals, [])} className="export-btn">
+                <button style={S.exportBtn} onClick={() => exportJSON(log, meds, animals, animalExams, metricDefs)} className="export-btn">
                   ⬇ Export as JSON
-                  <span style={S.exportSub}>Full backup — treatments, medications, animals</span>
+                  <span style={S.exportSub}>Full backup — treatments, meds, animals, exams</span>
                 </button>
                 <button style={S.exportBtn} onClick={() => exportCSV(log)} className="export-btn">
                   ⬇ Export as CSV
@@ -929,20 +1062,12 @@ export default function App() {
             </div>
             <div style={S.card}>
               <h3 style={S.cardTitle}>Import Data</h3>
-              <p style={S.cardDesc}>Import a previously exported JSON backup. Duplicates skipped.</p>
+              <p style={S.cardDesc}>Import a previously exported JSON backup.</p>
               <input type="file" accept=".json" ref={importRef} onChange={handleImportJSON} style={{ display:'none' }} />
               <button style={{ ...S.saveBtn, background:'#4a6b8a' }} onClick={() => importRef.current.click()} className="save-btn">
                 ⬆ Import JSON Backup
               </button>
             </div>
-            {dbStatus === 'local' && (
-              <div style={{ ...S.card, borderColor:'#c8a84a', background:'#fdf8ed' }}>
-                <h3 style={{ ...S.cardTitle, color:'#7a5a10' }}>💡 Move to Cloud</h3>
-                <p style={{ fontSize:'13px', color:'#7a5a10', margin:0, lineHeight:'1.5' }}>
-                  Storing locally on this device only. Ensure Supabase env vars are set in Vercel and redeploy, then use Import above.
-                </p>
-              </div>
-            )}
           </div>
         )}
 
@@ -951,7 +1076,7 @@ export default function App() {
   )
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Styles ───────────────────────────────────────────────────
 const S = {
   root: { fontFamily:"'DM Sans','Nunito',sans-serif", background:'#f4f0eb', minHeight:'100vh', color:'#2a2018' },
   header: { background:'#2a3d30', color:'#e8f0e9', padding:'12px 16px', display:'flex', alignItems:'center', gap:'10px' },
@@ -1022,9 +1147,12 @@ const S = {
   photo: { width:'96px', height:'96px', borderRadius:'14px', objectFit:'cover', border:'2px solid #ede6dd' },
   photoPlaceholder: { width:'96px', height:'96px', borderRadius:'14px', background:'#f0ebe4', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'44px', border:'2px dashed #d5ccc0' },
   photoBtn: { padding:'5px 10px', borderRadius:'20px', border:'1.5px solid #b8d4c0', background:'#eef6f1', color:'#3d6b52', fontSize:'11px', fontWeight:700, cursor:'pointer', whiteSpace:'nowrap' },
-  miniStat: { background:'#f4f0eb', borderRadius:'8px', padding:'7px 10px', textAlign:'center' },
+  miniStat: { background:'#f4f0eb', borderRadius:'8px', padding:'7px 10px', textAlign:'center', minWidth:'60px' },
   miniStatNum: { fontSize:'15px', fontWeight:800, color:'#2a3d30' },
   miniStatLabel: { fontSize:'10px', color:'#9a8a7a', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.4px' },
+  metricGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(130px, 1fr))', gap:'10px' },
+  examRow: { display:'flex', gap:'10px', alignItems:'flex-start', padding:'12px', background:'#faf8f5', borderRadius:'10px', border:'1px solid #ede6dd' },
+  examMetricBadge: { padding:'2px 8px', borderRadius:'20px', fontSize:'11px', background:'#eef6f1', border:'1px solid #c8dece', color:'#2a3d30', whiteSpace:'nowrap' },
 }
 
 const css = `
