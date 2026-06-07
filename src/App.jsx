@@ -217,13 +217,22 @@ export default function App() {
   // Known animals: name → latest weight_kg from latest exam
   const knownAnimals = useMemo(() => {
     const map = {}
+    // Prefer exam weight, fall back to latest treatment weight
     Object.entries(latestExams).forEach(([name, exam]) => {
       const wm = exam?.metrics?.find(m => m.metric === doseWeightMetric)
-      map[name] = wm ? wm.value : null
+      if (wm) map[name] = wm.value
+    })
+    // Fill in from treatment history for animals with no exam yet
+    Object.entries(animalHistory).forEach(([name, history]) => {
+      if (name in map) return
+      const last = history[0]
+      if (!last) return
+      if (last.weight_kg != null) map[name] = last.weight_kg
+      else if (last.weight != null) map[name] = toKg(last.weight)
     })
     animals.forEach(a => { if (!(a.name in map)) map[a.name] = null })
     return map
-  }, [latestExams, animals, doseWeightMetric])
+  }, [latestExams, animalHistory, animals, doseWeightMetric])
 
   const suggestions = useMemo(() => {
     if (!animalName.trim() || nameLocked) return []
@@ -249,18 +258,27 @@ export default function App() {
   const animalProfiles = useMemo(() => {
     const names = new Set([...Object.keys(animalHistory), ...animals.map(a => a.name)])
     return Array.from(names).sort().map(name => {
-      const profile    = animals.find(a => a.name === name) || {}
-      const history    = animalHistory[name] || []
-      const latestExam = latestExams[name] || null
+      const profile      = animals.find(a => a.name === name) || {}
+      const history      = animalHistory[name] || []
+      const latestExam   = latestExams[name] || null
       const weightMetric = latestExam?.metrics?.find(m => m.metric === doseWeightMetric)
+      // Fall back to most recent treatment weight if no exam exists yet
+      const fallbackWeightKg = (() => {
+        const lastTx = history[0]
+        if (!lastTx) return null
+        if (lastTx.weight_kg != null) return lastTx.weight_kg
+        if (lastTx.weight    != null) return toKg(lastTx.weight)
+        return null
+      })()
       return {
         name,
-        photo_url:    profile.photo_url || null,
-        notes:        profile.notes || '',
-        id:           profile.id,
+        photo_url:      profile.photo_url || null,
+        notes:          profile.notes || '',
+        id:             profile.id,
         history,
         latestExam,
-        latestWeightKg: weightMetric?.value || null,
+        latestWeightKg: weightMetric?.value ?? fallbackWeightKg,
+        weightFromExam: !!weightMetric,   // flag so UI can hint "no exam yet"
       }
     })
   }, [animalHistory, animals, latestExams, doseWeightMetric])
@@ -784,9 +802,12 @@ export default function App() {
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={S.animalName}>{profile.name}</div>
                     <div style={S.animalMeta}>
-                      {profile.latestWeightKg
+                      {profile.latestWeightKg != null
                         ? (isKg ? `${profile.latestWeightKg} kg` : `${toLbs(profile.latestWeightKg)} lbs`)
-                        : 'No exam recorded'}
+                        : 'No weight recorded'}
+                      {profile.latestWeightKg != null && !profile.weightFromExam
+                        ? <span style={{ color:'#c8a84a', fontSize:'10px', marginLeft:'5px' }}>from treatment</span>
+                        : null}
                       {' · '}{profile.history.length} treatment{profile.history.length!==1?'s':''}
                     </div>
                     {profile.latestExam && (

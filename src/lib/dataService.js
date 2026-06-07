@@ -49,11 +49,14 @@ export const DEFAULT_METRIC_DEFS = [
 
 export async function loadMetricDefs(useSupabase) {
   if (useSupabase) {
-    const { data, error } = await supabase
-      .from('metric_definitions').select('*').order('display_order')
-    if (!error && data?.length) return data
+    try {
+      const { data, error } = await supabase
+        .from('metric_definitions').select('*').order('display_order')
+      if (!error && data?.length) return data
+    } catch { /* table may not exist yet — fall through */ }
   }
-  return lsGet(LS_METRICS_DEF, DEFAULT_METRIC_DEFS)
+  const local = lsGet(LS_METRICS_DEF, null)
+  return local?.length ? local : DEFAULT_METRIC_DEFS
 }
 
 export async function saveMetricDefs(defs, useSupabase) {
@@ -185,12 +188,14 @@ export async function uploadAnimalPhoto(animalName, file) {
  */
 export async function loadExams(animalName, useSupabase) {
   if (useSupabase) {
-    const { data: examRows, error } = await supabase
-      .from('exams')
-      .select('*, exam_metrics(*)')
-      .eq('animal_name', animalName)
-      .order('recorded_at', { ascending: false })
-    if (!error && examRows) return examRows.map(formatExam)
+    try {
+      const { data: examRows, error } = await supabase
+        .from('exams')
+        .select('*, exam_metrics(*)')
+        .eq('animal_name', animalName)
+        .order('recorded_at', { ascending: false })
+      if (!error && examRows) return examRows.map(formatExam)
+    } catch { /* table may not exist yet */ }
   }
   // localStorage
   const all = lsGet(LS_EXAMS, [])
@@ -206,18 +211,20 @@ export async function loadExams(animalName, useSupabase) {
  */
 export async function loadLatestExams(useSupabase) {
   if (useSupabase) {
-    // Get the most recent exam per animal with its metrics
-    const { data, error } = await supabase
-      .from('exams')
-      .select('*, exam_metrics(*)')
-      .order('recorded_at', { ascending: false })
-    if (!error && data) {
-      const map = {}
-      data.forEach(row => {
-        if (!map[row.animal_name]) map[row.animal_name] = formatExam(row)
-      })
-      return map
-    }
+    try {
+      // Get the most recent exam per animal with its metrics
+      const { data, error } = await supabase
+        .from('exams')
+        .select('*, exam_metrics(*)')
+        .order('recorded_at', { ascending: false })
+      if (!error && data) {
+        const map = {}
+        data.forEach(row => {
+          if (!map[row.animal_name]) map[row.animal_name] = formatExam(row)
+        })
+        return map
+      }
+    } catch { /* table may not exist yet */ }
   }
   // localStorage
   const all = lsGet(LS_EXAMS, [])
