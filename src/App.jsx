@@ -11,7 +11,7 @@ import {
 } from './lib/dataService'
 
 // ─── Styles ───────────────────────────────────────────────────
-const S = {
+function makeStyles() { return {
   root: { fontFamily:"'DM Sans','Nunito',sans-serif", background:'#f4f0eb', minHeight:'100vh', color:'#2a2018' },
   header: { background:'#2a3d30', color:'#e8f0e9', padding:'12px 16px', display:'flex', alignItems:'center', gap:'10px' },
   logo: { fontSize:'22px' }, title: { fontSize:'16px', fontWeight:700, letterSpacing:'-0.3px' },
@@ -88,6 +88,7 @@ const S = {
   examRow: { display:'flex', gap:'10px', alignItems:'flex-start', padding:'12px', background:'#faf8f5', borderRadius:'10px', border:'1px solid #ede6dd' },
   examMetricBadge: { padding:'2px 8px', borderRadius:'20px', fontSize:'11px', background:'#eef6f1', border:'1px solid #c8dece', color:'#2a3d30', whiteSpace:'nowrap' },
 }
+const S = makeStyles()
 
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&display=swap');
