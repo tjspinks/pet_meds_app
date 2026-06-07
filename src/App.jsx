@@ -87,7 +87,7 @@ function makeStyles() { return {
   metricGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(130px, 1fr))', gap:'10px' },
   examRow: { display:'flex', gap:'10px', alignItems:'flex-start', padding:'12px', background:'#faf8f5', borderRadius:'10px', border:'1px solid #ede6dd' },
   examMetricBadge: { padding:'2px 8px', borderRadius:'20px', fontSize:'11px', background:'#eef6f1', border:'1px solid #c8dece', color:'#2a3d30', whiteSpace:'nowrap' },
-}
+} }
 const S = makeStyles()
 
 const css = `
