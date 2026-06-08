@@ -8,11 +8,9 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.error) return (
       <div style={{ padding: '20px', fontFamily: 'monospace', background: '#1a1a1a', color: '#ff6b6b', minHeight: '100vh' }}>
-        <h2>App crashed — error details:</h2>
+        <h2>App crashed:</h2>
         <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-          {this.state.error?.toString()}
-          {'\n\n'}
-          {this.state.error?.stack}
+          {this.state.error?.toString()}{'\n\n'}{this.state.error?.stack}
         </pre>
       </div>
     )
@@ -21,7 +19,5 @@ class ErrorBoundary extends React.Component {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <ErrorBoundary>
-    <App />
-  </ErrorBoundary>
+  <ErrorBoundary><App /></ErrorBoundary>
 )
